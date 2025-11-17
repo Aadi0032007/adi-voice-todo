@@ -8,6 +8,12 @@ A voice-controlled smart to-do list where you can **speak naturally**, and the A
 Press **Space** or click the button to speak — and watch your tasks update instantly.
 
 ---
+# 📘 About the Project
+
+The **A.D.I Voice To-Do App** is a lightweight, real-time, AI-powered productivity assistant designed to make task management as natural as having a conversation.  
+Instead of typing, clicking, or navigating menus, you simply **speak**, and the app interprets your intent using advanced language understanding.
+
+---
 
 ## ⚠️ Session-Based (Important)
 
@@ -29,6 +35,8 @@ Examples:
 - “Delete task 2.”
 - “Change task number 3 priority to high.”
 - “Mark task one as done.”
+- “Schedule a task for Monday at 6 PM.”
+The AI extracts intent, target task, priority, status, and time — all in real time.
 
 ### 🤖 **AI-powered intent parsing**
 Spoken commands → structured JSON intent → applied to your task list.
