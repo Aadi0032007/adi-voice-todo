@@ -68,36 +68,35 @@ function formatTime(iso?: string): string {
   return `${datePart} ${timePart?.slice(0, 5)}`;
 }
 
-/**
- * Try to fix STT mishearing indices, e.g. "32" when user meant "3".
- * Returns 0-based index or null if unusable.
- */
+// ----------- Index Normalization -----------
+
 function normalizeIndex(rawIndex: number, tasks: Task[]): number | null {
   const n = tasks.length;
   if (n === 0) return null;
 
-  // already valid (1-based -> 0-based)
   if (rawIndex >= 1 && rawIndex <= n) return rawIndex - 1;
 
-  // if more than one digit, try the first digit
   const s = String(rawIndex);
   if (s.length > 1) {
     const firstDigit = parseInt(s[0], 10);
-    if (firstDigit >= 1 && firstDigit <= n) {
-      return firstDigit - 1;
-    }
+    if (firstDigit >= 1 && firstDigit <= n) return firstDigit - 1;
   }
 
   return null;
 }
 
-/**
- * Normalize raw transcript text before sending to AI.
- * Example: "delete cars 2" -> "delete task 2"
- */
+// ----------- Text Normalization -----------
+
 function normalizeTranscriptText(text: string): string {
-  // Replace "cars 2" / "car 3" / "Cars 4" etc with "task 2"
-  return text.replace(/\b[Cc]ars?\s+(\d+)\b/g, "task $1");
+  // Fix "cars 2" → "task 2"
+  text = text.replace(/\b[Cc]ars?\s+(\d+)\b/g, "task $1");
+
+  // Fix large numbers → first digit
+  text = text.replace(/\btask\s+(\d{2,})\b/g, (_, num) => {
+    return `task ${num[0]}`;
+  });
+
+  return text;
 }
 
 // --- CRUD based on intent ---
@@ -111,7 +110,6 @@ function applyIntent(tasks: Task[], intent: Intent): Task[] {
           id: crypto.randomUUID(),
           title: intent.data.title ?? "Untitled task",
           scheduledTime: intent.data.scheduledTime,
-          // default to "low" if priority not provided
           priority: intent.data.priority ?? "low",
           status: intent.data.status ?? "pending",
         },
@@ -130,11 +128,7 @@ function deleteByTarget(tasks: Task[], target: Target): Task[] {
 
   if (target.mode === "by_index" && target.index != null) {
     const idx = normalizeIndex(target.index, tasks);
-    if (idx == null) {
-      // Out of range, do nothing (silent no-op)
-      console.warn("Ignoring delete: invalid index", target.index);
-      return tasks;
-    }
+    if (idx == null) return tasks;
     return tasks.filter((_, i) => i !== idx);
   }
 
@@ -165,10 +159,7 @@ function updateByTarget(
 
   if (target.mode === "by_index" && target.index != null) {
     const idx = normalizeIndex(target.index, tasks);
-    if (idx == null) {
-      console.warn("Ignoring update: invalid index", target.index);
-      return tasks;
-    }
+    if (idx == null) return tasks;
     return tasks.map((t, i) => (i === idx ? applyUpdate(t) : t));
   }
 
@@ -186,6 +177,10 @@ function updateByTarget(
 
   return tasks;
 }
+
+// ---------- API BASE ----------
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 // ---------- Component ----------
 
@@ -216,15 +211,14 @@ export default function HomePage() {
 
   const [filter, setFilter] = useState<Filter>(null);
   const [lastHeardText, setLastHeardText] = useState<string | null>(null);
-  const [lastActionSummary, setLastActionSummary] = useState<string | null>(
-    null
-  );
+  const [lastActionSummary, setLastActionSummary] =
+    useState<string | null>(null);
   const [listening, setListening] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
 
   const recognitionRef = useRef<any>(null);
 
-  // Toggle with spacebar
+  // Toggle with Spacebar
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.code === "Space" && !e.repeat) {
@@ -236,7 +230,7 @@ export default function HomePage() {
     return () => window.removeEventListener("keydown", handler);
   }, [listening]);
 
-  // Setup SpeechRecognition once
+  // Setup SpeechRecognition
   useEffect(() => {
     const w = window as any;
     const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
@@ -254,19 +248,20 @@ export default function HomePage() {
     rec.onresult = (event: any) => {
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (event.results[i].isFinal) {
-          const text = event.results[i][0].transcript.trim();
-          processTranscript(text);
+          const raw = event.results[i][0].transcript.trim();
+          processTranscript(raw);
         }
       }
     };
 
     rec.onerror = console.error;
+
     rec.onend = () => {
-      // no auto-restart; user presses Space again
+      if (listening) rec.start(); // safe restart
     };
 
     recognitionRef.current = rec;
-  }, []);
+  }, [listening]);
 
   function startListening() {
     if (!speechSupported) return;
@@ -284,7 +279,7 @@ export default function HomePage() {
     setLastActionSummary("Processing...");
 
     try {
-      const res = await fetch("http://localhost:8000/parse-intent", {
+      const res = await fetch(`${API_BASE}/parse-intent`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
@@ -301,17 +296,11 @@ export default function HomePage() {
     }
   }
 
-  function processTranscript(text: string) {
-    console.log("Heard (raw):", text);
-    const cleaned = normalizeTranscriptText(text);
-    console.log("Normalized for AI:", cleaned);
-
-    // Stop listening as soon as we have one command
-    stopListening();
+  function processTranscript(rawText: string) {
+    const cleaned = normalizeTranscriptText(rawText);
+    stopListening(); // prevent double execution
     sendToPython(cleaned);
-
-    // Show the raw thing the user actually said in the UI
-    setLastHeardText(text);
+    setLastHeardText(rawText);
   }
 
   const visibleTasks = useMemo(() => {
@@ -336,8 +325,7 @@ export default function HomePage() {
               </p>
               {!speechSupported && (
                 <p className="text-xs text-red-400 mt-1">
-                  Speech recognition not supported in this browser. Try Chrome
-                  or Edge.
+                  Speech recognition not supported. Use Chrome/Edge.
                 </p>
               )}
             </div>
@@ -352,7 +340,7 @@ export default function HomePage() {
             </button>
           </header>
 
-          {/* Last command card */}
+          {/* Last command */}
           <section className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
             <h2 className="text-sm font-semibold text-slate-300 mb-2">
               Last command
@@ -371,12 +359,12 @@ export default function HomePage() {
             </p>
           </section>
 
-          {/* Tasks */}
+          {/* Tasks section */}
           <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
             <div className="mb-3 flex items-center justify-between gap-4">
               <h2 className="text-sm font-semibold text-slate-300">Tasks</h2>
 
-              {/* Priority filter buttons */}
+              {/* Priority filters */}
               <div className="flex gap-2 text-xs">
                 <button
                   onClick={() => setFilter(null)}
@@ -421,6 +409,7 @@ export default function HomePage() {
               </div>
             </div>
 
+            {/* Task table */}
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-800">
