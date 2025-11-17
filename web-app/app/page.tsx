@@ -68,8 +68,6 @@ function formatTime(iso?: string): string {
   return `${datePart} ${timePart?.slice(0, 5)}`;
 }
 
-// ----------- Index Normalization -----------
-
 function normalizeIndex(rawIndex: number, tasks: Task[]): number | null {
   const n = tasks.length;
   if (n === 0) return null;
@@ -79,112 +77,25 @@ function normalizeIndex(rawIndex: number, tasks: Task[]): number | null {
   const s = String(rawIndex);
   if (s.length > 1) {
     const firstDigit = parseInt(s[0], 10);
-    if (firstDigit >= 1 && firstDigit <= n) return firstDigit - 1;
+    if (firstDigit >= 1 && firstDigit <= n) {
+      return firstDigit - 1;
+    }
   }
 
   return null;
 }
 
-// ----------- Text Normalization -----------
-
+/** Fix misheard "cars 2" → "task 2" */
 function normalizeTranscriptText(text: string): string {
-  // Fix "cars 2" → "task 2"
-  text = text.replace(/\b[Cc]ars?\s+(\d+)\b/g, "task $1");
-
-  // Fix large numbers → first digit
-  text = text.replace(/\btask\s+(\d{2,})\b/g, (_, num) => {
-    return `task ${num[0]}`;
-  });
-
-  return text;
+  return text.replace(/\b[Cc]ars?\s+(\d+)\b/g, "task $1");
 }
-
-// --- CRUD based on intent ---
-
-function applyIntent(tasks: Task[], intent: Intent): Task[] {
-  switch (intent.operation) {
-    case "create":
-      return [
-        ...tasks,
-        {
-          id: crypto.randomUUID(),
-          title: intent.data.title ?? "Untitled task",
-          scheduledTime: intent.data.scheduledTime,
-          priority: intent.data.priority ?? "low",
-          status: intent.data.status ?? "pending",
-        },
-      ];
-    case "delete":
-      return deleteByTarget(tasks, intent.target);
-    case "update":
-      return updateByTarget(tasks, intent.target, intent.data);
-    default:
-      return tasks;
-  }
-}
-
-function deleteByTarget(tasks: Task[], target: Target): Task[] {
-  if (!target) return tasks;
-
-  if (target.mode === "by_index" && target.index != null) {
-    const idx = normalizeIndex(target.index, tasks);
-    if (idx == null) return tasks;
-    return tasks.filter((_, i) => i !== idx);
-  }
-
-  if (target.mode === "by_match" && target.match_query) {
-    const q = target.match_query.toLowerCase();
-    return tasks.filter((t) => !t.title.toLowerCase().includes(q));
-  }
-
-  if (target.mode === "all") return [];
-
-  return tasks;
-}
-
-function updateByTarget(
-  tasks: Task[],
-  target: Target,
-  data: Intent["data"]
-): Task[] {
-  if (!target) return tasks;
-
-  const applyUpdate = (t: Task): Task => ({
-    ...t,
-    title: data.title ?? t.title,
-    scheduledTime: data.scheduledTime ?? t.scheduledTime,
-    priority: data.priority ?? t.priority,
-    status: data.status ?? t.status,
-  });
-
-  if (target.mode === "by_index" && target.index != null) {
-    const idx = normalizeIndex(target.index, tasks);
-    if (idx == null) return tasks;
-    return tasks.map((t, i) => (i === idx ? applyUpdate(t) : t));
-  }
-
-  if (target.mode === "by_match" && target.match_query) {
-    const q = target.match_query.toLowerCase();
-    let changed = false;
-    return tasks.map((t) => {
-      if (!changed && t.title.toLowerCase().includes(q)) {
-        changed = true;
-        return applyUpdate(t);
-      }
-      return t;
-    });
-  }
-
-  return tasks;
-}
-
-// ---------- API BASE ----------
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 // ---------- Component ----------
 
 export default function HomePage() {
+  const API_BASE =
+    process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
   const [tasks, setTasks] = useState<Task[]>([
     {
       id: "1",
@@ -211,14 +122,15 @@ export default function HomePage() {
 
   const [filter, setFilter] = useState<Filter>(null);
   const [lastHeardText, setLastHeardText] = useState<string | null>(null);
-  const [lastActionSummary, setLastActionSummary] =
-    useState<string | null>(null);
+  const [lastActionSummary, setLastActionSummary] = useState<string | null>(
+    null
+  );
   const [listening, setListening] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
 
   const recognitionRef = useRef<any>(null);
 
-  // Toggle with Spacebar
+  // Toggle with spacebar
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.code === "Space" && !e.repeat) {
@@ -230,7 +142,7 @@ export default function HomePage() {
     return () => window.removeEventListener("keydown", handler);
   }, [listening]);
 
-  // Setup SpeechRecognition
+  // SpeechRecognition setup
   useEffect(() => {
     const w = window as any;
     const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
@@ -248,20 +160,25 @@ export default function HomePage() {
     rec.onresult = (event: any) => {
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (event.results[i].isFinal) {
-          const raw = event.results[i][0].transcript.trim();
-          processTranscript(raw);
+          const text = event.results[i][0].transcript.trim();
+          processTranscript(text);
         }
       }
     };
 
-    rec.onerror = console.error;
-
-    rec.onend = () => {
-      if (listening) rec.start(); // safe restart
+    // FIX → prevent Next.js crash screen
+    rec.onerror = (event: any) => {
+      console.warn("SpeechRecognition error:", event?.error || event);
+      try {
+        recognitionRef.current?.stop();
+      } catch {}
+      setListening(false);
     };
 
+    rec.onend = () => {};
+
     recognitionRef.current = rec;
-  }, [listening]);
+  }, []);
 
   function startListening() {
     if (!speechSupported) return;
@@ -291,16 +208,94 @@ export default function HomePage() {
       setTasks((prev) => applyIntent(prev, intent));
       setLastActionSummary(`AI action: ${intent.operation}`);
     } catch (e) {
-      console.error(e);
+      console.warn(e);
       setLastActionSummary("Backend error");
     }
   }
 
-  function processTranscript(rawText: string) {
-    const cleaned = normalizeTranscriptText(rawText);
-    stopListening(); // prevent double execution
+  function processTranscript(text: string) {
+    const cleaned = normalizeTranscriptText(text);
+    stopListening();
     sendToPython(cleaned);
-    setLastHeardText(rawText);
+    setLastHeardText(text);
+  }
+
+  // --- CRUD ---
+  function applyIntent(tasks: Task[], intent: Intent): Task[] {
+    switch (intent.operation) {
+      case "create":
+        return [
+          ...tasks,
+          {
+            id: crypto.randomUUID(),
+            title: intent.data.title ?? "Untitled task",
+            scheduledTime: intent.data.scheduledTime,
+            priority: intent.data.priority ?? "low", // default fixed
+            status: intent.data.status ?? "pending",
+          },
+        ];
+      case "delete":
+        return deleteByTarget(tasks, intent.target);
+      case "update":
+        return updateByTarget(tasks, intent.target, intent.data);
+      default:
+        return tasks;
+    }
+  }
+
+  function deleteByTarget(tasks: Task[], target: Target): Task[] {
+    if (!target) return tasks;
+
+    if (target.mode === "by_index" && target.index != null) {
+      const idx = normalizeIndex(target.index, tasks);
+      if (idx == null) return tasks;
+      return tasks.filter((_, i) => i !== idx);
+    }
+
+    if (target.mode === "by_match" && target.match_query) {
+      const q = target.match_query.toLowerCase();
+      return tasks.filter((t) => !t.title.toLowerCase().includes(q));
+    }
+
+    if (target.mode === "all") return [];
+
+    return tasks;
+  }
+
+  function updateByTarget(
+    tasks: Task[],
+    target: Target,
+    data: Intent["data"]
+  ): Task[] {
+    if (!target) return tasks;
+
+    const apply = (t: Task): Task => ({
+      ...t,
+      title: data.title ?? t.title,
+      scheduledTime: data.scheduledTime ?? t.scheduledTime,
+      priority: data.priority ?? t.priority,
+      status: data.status ?? t.status,
+    });
+
+    if (target.mode === "by_index" && target.index != null) {
+      const idx = normalizeIndex(target.index, tasks);
+      if (idx == null) return tasks;
+      return tasks.map((t, i) => (i === idx ? apply(t) : t));
+    }
+
+    if (target.mode === "by_match" && target.match_query) {
+      const q = target.match_query.toLowerCase();
+      let changed = false;
+      return tasks.map((t) => {
+        if (!changed && t.title.toLowerCase().includes(q)) {
+          changed = true;
+          return apply(t);
+        }
+        return t;
+      });
+    }
+
+    return tasks;
   }
 
   const visibleTasks = useMemo(() => {
@@ -325,7 +320,7 @@ export default function HomePage() {
               </p>
               {!speechSupported && (
                 <p className="text-xs text-red-400 mt-1">
-                  Speech recognition not supported. Use Chrome/Edge.
+                  Speech recognition not supported on this browser.
                 </p>
               )}
             </div>
@@ -340,7 +335,7 @@ export default function HomePage() {
             </button>
           </header>
 
-          {/* Last command */}
+          {/* Last Command */}
           <section className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
             <h2 className="text-sm font-semibold text-slate-300 mb-2">
               Last command
@@ -359,12 +354,11 @@ export default function HomePage() {
             </p>
           </section>
 
-          {/* Tasks section */}
+          {/* Tasks */}
           <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
             <div className="mb-3 flex items-center justify-between gap-4">
               <h2 className="text-sm font-semibold text-slate-300">Tasks</h2>
 
-              {/* Priority filters */}
               <div className="flex gap-2 text-xs">
                 <button
                   onClick={() => setFilter(null)}
@@ -409,7 +403,6 @@ export default function HomePage() {
               </div>
             </div>
 
-            {/* Task table */}
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-800">
