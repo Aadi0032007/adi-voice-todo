@@ -1,0 +1,25 @@
+# Node
+web-app/node_modules/
+web-app/.next/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python
+ai-backend/__pycache__/
+ai-backend/.venv/
+ai-backend/*.pyc
+
+# Env / secrets
+.env
+.env.*
+ai-backend/.env
+web-app/.env
+web-app/.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
