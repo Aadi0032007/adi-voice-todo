@@ -15,38 +15,34 @@ type Task = {
   status: TaskStatus;
 };
 
-type Target =
-  | {
-      mode: "by_index" | "by_match" | "all" | null;
-      index?: number;
-      match_query?: string;
-    }
-  | null;
-
 type Intent = {
-  operation: "create" | "delete" | "update" | "filter" | "noop";
-  target: Target;
+  operation: "create" | "update" | "delete" | "noop";
+  target: {
+    mode: "by_id" | null;
+    task_id: string | null;
+  } | null;
   data: {
-    title?: string;
-    scheduledTime?: string;
-    priority?: Priority;
-    status?: TaskStatus;
+    title?: string | null;
+    scheduledTime?: string | null;
+    priority?: Priority | null;
+    status?: TaskStatus | null;
   };
 };
 
-type Filter = {
-  priority?: Priority;
-  search?: string;
-} | null;
+type Filter = { priority?: Priority } | null;
 
 // ---------- Helpers ----------
 
 function sortTasks(tasks: Task[]): Task[] {
-  const order: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
+  const priorityOrder: Record<Priority, number> = {
+    high: 0,
+    medium: 1,
+    low: 2,
+  };
 
   return [...tasks].sort((a, b) => {
-    const p = order[a.priority] - order[b.priority];
-    if (p !== 0) return p;
+    const diff = priorityOrder[a.priority] - priorityOrder[b.priority];
+    if (diff !== 0) return diff;
 
     if (a.scheduledTime && b.scheduledTime)
       return a.scheduledTime.localeCompare(b.scheduledTime);
@@ -58,51 +54,20 @@ function sortTasks(tasks: Task[]): Task[] {
   });
 }
 
-function formatTime(iso?: string): string {
+function formatTime(iso?: string) {
   if (!iso) return "Not scheduled";
-  const [date, time] = iso.split("T");
-  return `${date} ${time.slice(0, 5)}`;
-}
-
-function normalizeIndex(rawIndex: number, tasks: Task[]): number | null {
-  const n = tasks.length;
-  if (rawIndex >= 1 && rawIndex <= n) return rawIndex - 1;
-
-  const s = String(rawIndex);
-  if (s.length > 1) {
-    const tryDigit = parseInt(s[0], 10);
-    if (tryDigit >= 1 && tryDigit <= n) return tryDigit - 1;
-  }
-
-  return null;
+  const [d, t] = iso.split("T");
+  return `${d} ${t?.slice(0, 5)}`;
 }
 
 function normalizeTranscriptText(text: string): string {
+  // "cars 2" → "task 2"
   return text.replace(/\b[Cc]ars?\s+(\d+)\b/g, "task $1");
 }
 
-function matchesTitleFuzzy(title: string, q: string): boolean {
-  const t = title.toLowerCase();
-  const words = q.toLowerCase().trim().split(" ");
-  return words.some((w) => t.includes(w));
-}
+// ---------- Intent Application ----------
 
-function getVisibleTasks(tasks: Task[], filter: Filter): Task[] {
-  let list = [...tasks];
-  if (filter?.priority) list = list.filter((t) => t.priority === filter.priority);
-  return sortTasks(list);
-}
-
-// ---------- CRUD ----------
-
-function applyIntent(tasks: Task[], intent: Intent): Task[] {
-  if (!intent || !intent.operation) return tasks;
-
-  if (!["create", "delete", "update", "filter", "noop"].includes(intent.operation)) {
-    console.warn("Unknown operation ignored:", intent.operation);
-    return tasks;
-  }
-
+function applySafeIntent(tasks: Task[], intent: Intent): Task[] {
   switch (intent.operation) {
     case "create":
       return [
@@ -110,103 +75,46 @@ function applyIntent(tasks: Task[], intent: Intent): Task[] {
         {
           id: crypto.randomUUID(),
           title: intent.data.title ?? "Untitled task",
-          scheduledTime: intent.data.scheduledTime,
+          scheduledTime: intent.data.scheduledTime ?? undefined,
           priority: intent.data.priority ?? "low",
           status: intent.data.status ?? "pending",
         },
       ];
 
-    case "delete":
-      return deleteByTarget(tasks, intent.target);
+    case "delete": {
+      const tid = intent.target?.task_id;
+      if (!tid) return tasks;
+      return tasks.filter((t) => t.id !== tid);
+    }
 
-    case "update":
-      return updateByTarget(tasks, intent.target, intent.data);
+    case "update": {
+      const tid = intent.target?.task_id;
+      if (!tid) return tasks;
+
+      return tasks.map((t) =>
+        t.id === tid
+          ? {
+              ...t,
+              title: intent.data.title ?? t.title,
+              scheduledTime: intent.data.scheduledTime ?? t.scheduledTime,
+              priority: intent.data.priority ?? t.priority,
+              status: intent.data.status ?? t.status,
+            }
+          : t
+      );
+    }
 
     default:
       return tasks;
   }
 }
 
-function deleteByTarget(tasks: Task[], target: Target): Task[] {
-  if (!target) return tasks;
+// ---------- API Base ----------
 
-  if (target.mode === "by_index" && target.index != null) {
-    const idx = normalizeIndex(target.index, tasks);
-    if (idx == null) return tasks;
-    return tasks.filter((_, i) => i !== idx);
-  }
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
-  if (target.mode === "by_match" && target.match_query) {
-    return tasks.filter((t) => !matchesTitleFuzzy(t.title, target.match_query!));
-  }
-
-  if (target.mode === "all") return [];
-
-  return tasks;
-}
-
-function updateByTarget(tasks: Task[], target: Target, data: Intent["data"]): Task[] {
-  if (!target) return tasks;
-
-  const apply = (t: Task): Task => ({
-    ...t,
-    title: data.title ?? t.title,
-    scheduledTime: data.scheduledTime ?? t.scheduledTime,
-    priority: data.priority ?? t.priority,
-    status: data.status ?? t.status,
-  });
-
-  if (target.mode === "by_index" && target.index != null) {
-    const idx = normalizeIndex(target.index, tasks);
-    if (idx == null) return tasks;
-
-    return tasks.map((t, i) => (i === idx ? apply(t) : t));
-  }
-
-  if (target.mode === "by_match" && target.match_query) {
-    let applied = false;
-    return tasks.map((t) => {
-      if (!applied && matchesTitleFuzzy(t.title, target.match_query!)) {
-        applied = true;
-        return apply(t);
-      }
-      return t;
-    });
-  }
-
-  return tasks;
-}
-
-// ---------- INDEX REMAPPING ----------
-
-function remapIntentForUI(intent: Intent, tasks: Task[], filter: Filter): Intent {
-  if (!intent.target || intent.target.mode !== "by_index") return intent;
-
-  const visible = getVisibleTasks(tasks, filter);
-  const uiIndex = (intent.target.index ?? 1) - 1;
-
-  if (uiIndex < 0 || uiIndex >= visible.length) {
-    console.warn("UI index out of range");
-    return { ...intent, operation: "noop" };
-  }
-
-  const selectedId = visible[uiIndex].id;
-  const realIdx = tasks.findIndex((t) => t.id === selectedId);
-
-  return {
-    ...intent,
-    target: {
-      ...intent.target,
-      index: realIdx + 1,
-    },
-  };
-}
-
-// ---------- API BASE ----------
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
-
-// ---------- COMPONENT ----------
+// ---------- Component ----------
 
 export default function HomePage() {
   const [tasks, setTasks] = useState<Task[]>([
@@ -227,7 +135,6 @@ export default function HomePage() {
     {
       id: "3",
       title: "Clean up analytics dashboard",
-      scheduledTime: undefined,
       priority: "low",
       status: "done",
     },
@@ -235,13 +142,14 @@ export default function HomePage() {
 
   const [filter, setFilter] = useState<Filter>(null);
   const [lastHeardText, setLastHeardText] = useState<string | null>(null);
-  const [lastActionSummary, setLastActionSummary] = useState<string | null>(null);
+  const [lastActionSummary, setLastActionSummary] =
+    useState<string | null>(null);
   const [listening, setListening] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
 
   const recognitionRef = useRef<any>(null);
 
-  // SPACEBAR toggle
+  // Space toggles listening
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.code === "Space" && !e.repeat) {
@@ -253,7 +161,7 @@ export default function HomePage() {
     return () => window.removeEventListener("keydown", handler);
   }, [listening]);
 
-  // SpeechRecognition setup
+  // Setup browser speech recognition
   useEffect(() => {
     const w = window as any;
     const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
@@ -271,12 +179,19 @@ export default function HomePage() {
     rec.onresult = (event: any) => {
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (event.results[i].isFinal) {
-          processTranscript(event.results[i][0].transcript.trim());
+          const text = event.results[i][0].transcript.trim();
+          processTranscript(text);
         }
       }
     };
 
-    rec.onerror = () => setListening(false);
+    rec.onerror = () => {
+      try {
+        rec.stop();
+      } catch {}
+      setListening(false);
+    };
+
     recognitionRef.current = rec;
   }, []);
 
@@ -290,7 +205,6 @@ export default function HomePage() {
     setListening(false);
   }
 
-  // ---------- MAIN REQUEST HANDLER ----------
   async function sendToPython(text: string) {
     setLastHeardText(text);
     setLastActionSummary("Processing...");
@@ -299,51 +213,47 @@ export default function HomePage() {
       const res = await fetch(`${API_BASE}/parse-intent`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({
+          text,
+          tasks,
+        }),
       });
 
       const data = await res.json();
+      const intent: Intent = data.intent;
 
-      // SAFETY FALLBACK
-      let rawIntent: Intent =
-        data?.intent ?? ({
-          operation: "noop",
-          target: null,
-          data: {},
-        } as Intent);
-
-      if (
-        !rawIntent ||
-        !["create", "update", "delete", "filter", "noop"].includes(rawIntent.operation)
-      ) {
-        console.warn("Invalid intent received:", rawIntent);
-        setLastActionSummary("Ignored invalid command");
+      if (!intent || intent.operation === "noop") {
+        setLastActionSummary("No action (unclear)");
         return;
       }
 
-      setTasks((prev) => {
-        const mapped = remapIntentForUI(rawIntent, prev, filter);
-        return applyIntent(prev, mapped);
-      });
-
-      setLastActionSummary(`AI action: ${rawIntent.operation}`);
+      setTasks((prev) => applySafeIntent(prev, intent));
+      setLastActionSummary(`Action: ${intent.operation}`);
     } catch (err) {
-      console.warn("Error:", err);
+      console.error(err);
       setLastActionSummary("Backend error");
     }
   }
 
   function processTranscript(text: string) {
     const cleaned = normalizeTranscriptText(text);
+
     stopListening();
     sendToPython(cleaned);
+
+    setLastHeardText(text);
   }
 
-  const visibleTasks = useMemo(() => getVisibleTasks(tasks, filter), [tasks, filter]);
+  const visibleTasks = useMemo(() => {
+    let result = [...tasks];
+    if (filter?.priority) {
+      result = result.filter((t) => t.priority === filter.priority);
+    }
+    return sortTasks(result);
+  }, [tasks, filter]);
 
   const currentPriorityFilter = filter?.priority ?? null;
 
-  // ---------- UI ----------
   return (
     <div className="min-h-screen flex flex-col bg-slate-950 text-slate-50">
       <main className="flex-grow">
@@ -352,8 +262,15 @@ export default function HomePage() {
             <div>
               <h1 className="text-3xl font-bold">A.D.I To-Do Lists</h1>
               <p className="text-sm text-slate-400">
-                Press <span className="font-mono">Space</span> to start/stop listening.
+                Press <span className="font-mono">Space</span> to start/stop
+                listening.
               </p>
+
+              {!speechSupported && (
+                <p className="text-xs text-red-400 mt-1">
+                  Speech Recognition not supported. Use Chrome.
+                </p>
+              )}
             </div>
 
             <button
@@ -366,42 +283,71 @@ export default function HomePage() {
             </button>
           </header>
 
-          {/* Last command card */}
+          {/* Last command */}
           <section className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-            <h2 className="text-sm font-semibold text-slate-300 mb-2">Last command</h2>
+            <h2 className="text-sm font-semibold text-slate-300 mb-2">
+              Last command
+            </h2>
             <p className="text-slate-400">
-              Heard: <span className="text-slate-100">{lastHeardText ?? "None"}</span>
+              Heard:{" "}
+              <span className="text-slate-100">
+                {lastHeardText ?? "None"}
+              </span>
             </p>
             <p className="text-slate-400">
-              Action: <span className="text-emerald-400">{lastActionSummary ?? "—"}</span>
+              Action:{" "}
+              <span className="text-emerald-400">
+                {lastActionSummary ?? "—"}
+              </span>
             </p>
           </section>
 
-          {/* TASK TABLE */}
+          {/* Tasks table */}
           <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-            <div className="mb-3 flex items-center justify-between gap-4">
+            <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-300">Tasks</h2>
 
-              {/* Filters */}
               <div className="flex gap-2 text-xs">
-                {["All", "high", "medium", "low"].map((level) => (
-                  <button
-                    key={level}
-                    onClick={() =>
-                      level === "All"
-                        ? setFilter(null)
-                        : setFilter({ priority: level as Priority })
-                    }
-                    className={`rounded-full px-3 py-1 border ${
-                      currentPriorityFilter === level ||
-                      (level === "All" && currentPriorityFilter === null)
-                        ? "bg-slate-100 text-slate-900 border-slate-100"
-                        : "border-slate-600 text-slate-300 hover:border-slate-300"
-                    }`}
-                  >
-                    {level}
-                  </button>
-                ))}
+                <button
+                  onClick={() => setFilter(null)}
+                  className={`rounded-full px-3 py-1 border ${
+                    currentPriorityFilter === null
+                      ? "bg-slate-100 text-slate-900"
+                      : "border-slate-600 text-slate-300"
+                  }`}
+                >
+                  All
+                </button>
+                <button
+                  onClick={() => setFilter({ priority: "high" })}
+                  className={`rounded-full px-3 py-1 border ${
+                    currentPriorityFilter === "high"
+                      ? "bg-red-500 text-white"
+                      : "border-slate-600 text-slate-300"
+                  }`}
+                >
+                  High
+                </button>
+                <button
+                  onClick={() => setFilter({ priority: "medium" })}
+                  className={`rounded-full px-3 py-1 border ${
+                    currentPriorityFilter === "medium"
+                      ? "bg-amber-400 text-black"
+                      : "border-slate-600 text-slate-300"
+                  }`}
+                >
+                  Medium
+                </button>
+                <button
+                  onClick={() => setFilter({ priority: "low" })}
+                  className={`rounded-full px-3 py-1 border ${
+                    currentPriorityFilter === "low"
+                      ? "bg-emerald-500 text-black"
+                      : "border-slate-600 text-slate-300"
+                  }`}
+                >
+                  Low
+                </button>
               </div>
             </div>
 
@@ -433,9 +379,21 @@ export default function HomePage() {
       </main>
 
       <footer className="mt-auto text-center text-gray-400 text-sm border-t border-slate-800 py-4">
-        <p>Created by <strong>Aditya Raj (aadi0032007)</strong></p>
-        <p>Email: <a href="mailto:ms.adityaraj@gmail.com" className="text-blue-400">ms.adityaraj@gmail.com</a></p>
-        <p>Contact: <a href="tel:+917543037822" className="text-blue-400">+91-7543037822</a></p>
+        <p>
+          Created by <strong>Aditya Raj (aadi0032007)</strong>
+        </p>
+        <p>
+          Email:{" "}
+          <a href="mailto:ms.adityaraj@gmail.com" className="text-blue-400">
+            ms.adityaraj@gmail.com
+          </a>
+        </p>
+        <p>
+          Contact:{" "}
+          <a href="tel:+917543037822" className="text-blue-400">
+            +91-7543037822
+          </a>
+        </p>
       </footer>
     </div>
   );
