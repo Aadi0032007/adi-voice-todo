@@ -42,15 +42,15 @@ type Filter = {
 // ---------- Helpers ----------
 
 function sortTasks(tasks: Task[]): Task[] {
-  const order: Record<Priority, number> = {
+  const priorityOrder: Record<Priority, number> = {
     high: 0,
     medium: 1,
     low: 2,
   };
 
   return [...tasks].sort((a, b) => {
-    const diff = order[a.priority] - order[b.priority];
-    if (diff !== 0) return diff;
+    const prioDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
+    if (prioDiff !== 0) return prioDiff;
 
     if (a.scheduledTime && b.scheduledTime)
       return a.scheduledTime.localeCompare(b.scheduledTime);
@@ -64,10 +64,11 @@ function sortTasks(tasks: Task[]): Task[] {
 
 function formatTime(iso?: string): string {
   if (!iso) return "Not scheduled";
-  const [d, t] = iso.split("T");
-  return `${d} ${t?.slice(0, 5)}`;
+  const [datePart, timePart] = iso.split("T");
+  return `${datePart} ${timePart?.slice(0, 5)}`;
 }
 
+/** normalize numeric index from model to 0-based array index */
 function normalizeIndex(rawIndex: number, tasks: Task[]): number | null {
   const n = tasks.length;
   if (n === 0) return null;
@@ -77,28 +78,35 @@ function normalizeIndex(rawIndex: number, tasks: Task[]): number | null {
   const s = String(rawIndex);
   if (s.length > 1) {
     const firstDigit = parseInt(s[0], 10);
-    if (firstDigit >= 1 && firstDigit <= n) return firstDigit - 1;
+    if (firstDigit >= 1 && firstDigit <= n) {
+      return firstDigit - 1;
+    }
   }
 
   return null;
 }
 
+/** Fix misheard "cars 2" → "task 2" */
 function normalizeTranscriptText(text: string): string {
   return text.replace(/\b[Cc]ars?\s+(\d+)\b/g, "task $1");
 }
 
+/** Fuzzy title matching for "delete the payment bug task" etc. */
 function matchesTitleFuzzy(title: string, query: string): boolean {
-  const t = title.toLowerCase();
+  const normalizedTitle = title.toLowerCase();
   const q = query.toLowerCase().trim();
   if (!q) return false;
 
-  const parts = q.split(" ").filter(Boolean);
-  return parts.some((w) => t.includes(w));
+  const words = q.split(" ").filter(Boolean);
+  return words.some((w) => normalizedTitle.includes(w));
 }
 
+/** Visible tasks (what the user sees) = filtered + sorted */
 function getVisibleTasks(tasks: Task[], filter: Filter): Task[] {
   let result = [...tasks];
-  if (filter?.priority) result = result.filter((t) => t.priority === filter.priority);
+  if (filter?.priority) {
+    result = result.filter((t) => t.priority === filter.priority);
+  }
   return sortTasks(result);
 }
 
@@ -113,17 +121,14 @@ function applyIntent(tasks: Task[], intent: Intent): Task[] {
           id: crypto.randomUUID(),
           title: intent.data.title ?? "Untitled task",
           scheduledTime: intent.data.scheduledTime,
-          priority: intent.data.priority ?? "low",
+          priority: intent.data.priority ?? "low", // default low
           status: intent.data.status ?? "pending",
         },
       ];
-
     case "delete":
       return deleteByTarget(tasks, intent.target);
-
     case "update":
       return updateByTarget(tasks, intent.target, intent.data);
-
     default:
       return tasks;
   }
@@ -139,7 +144,10 @@ function deleteByTarget(tasks: Task[], target: Target): Task[] {
   }
 
   if (target.mode === "by_match" && target.match_query) {
-    return tasks.filter((t) => !matchesTitleFuzzy(t.title, target.match_query!));
+    const q = target.match_query;
+    if (!q.trim()) return tasks;
+
+    return tasks.filter((t) => !matchesTitleFuzzy(t.title, q));
   }
 
   if (target.mode === "all") return [];
@@ -147,10 +155,14 @@ function deleteByTarget(tasks: Task[], target: Target): Task[] {
   return tasks;
 }
 
-function updateByTarget(tasks: Task[], target: Target, data: Intent["data"]): Task[] {
+function updateByTarget(
+  tasks: Task[],
+  target: Target,
+  data: Intent["data"]
+): Task[] {
   if (!target) return tasks;
 
-  const apply = (t: Task): Task => ({
+  const applyUpdate = (t: Task): Task => ({
     ...t,
     title: data.title ?? t.title,
     scheduledTime: data.scheduledTime ?? t.scheduledTime,
@@ -161,15 +173,18 @@ function updateByTarget(tasks: Task[], target: Target, data: Intent["data"]): Ta
   if (target.mode === "by_index" && target.index != null) {
     const idx = normalizeIndex(target.index, tasks);
     if (idx == null) return tasks;
-    return tasks.map((t, i) => (i === idx ? apply(t) : t));
+    return tasks.map((t, i) => (i === idx ? applyUpdate(t) : t));
   }
 
   if (target.mode === "by_match" && target.match_query) {
-    let done = false;
+    const q = target.match_query;
+    if (!q.trim()) return tasks;
+
+    let changed = false;
     return tasks.map((t) => {
-      if (!done && matchesTitleFuzzy(t.title, target.match_query!)) {
-        done = true;
-        return apply(t);
+      if (!changed && matchesTitleFuzzy(t.title, q)) {
+        changed = true;
+        return applyUpdate(t);
       }
       return t;
     });
@@ -178,35 +193,44 @@ function updateByTarget(tasks: Task[], target: Target, data: Intent["data"]): Ta
   return tasks;
 }
 
-// ---------- Remapping ----------
+// ---------- Remap index so "task 1" refers to visible row 1 ----------
 
 function remapIntentForUI(intent: Intent, tasks: Task[], filter: Filter): Intent {
   if (!intent.target || intent.target.mode !== "by_index") return intent;
   if (intent.target.index == null) return intent;
 
   const visible = getVisibleTasks(tasks, filter);
-  const uiIndex = intent.target.index - 1;
+  const uiIndex = intent.target.index - 1; // 1-based to 0-based
 
-  if (uiIndex < 0 || uiIndex >= visible.length) return { ...intent, operation: "noop" };
+  if (uiIndex < 0 || uiIndex >= visible.length) {
+    console.warn("UI index out of range:", intent.target.index);
+    return { ...intent, operation: "noop" };
+  }
 
   const taskId = visible[uiIndex].id;
-  const actualIndex = tasks.findIndex((t) => t.id === taskId);
-  if (actualIndex === -1) return intent;
+  const realIndex = tasks.findIndex((t) => t.id === taskId);
+  if (realIndex === -1) {
+    console.warn("Could not map visible index to real task index");
+    return intent;
+  }
 
   return {
     ...intent,
     target: {
       ...intent.target,
-      index: actualIndex + 1,
+      index: realIndex + 1, // back to 1-based for normalizeIndex()
     },
   };
 }
 
+// ---------- API BASE ----------
+
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
 // ---------- Component ----------
 
 export default function HomePage() {
-  const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
-
   const [tasks, setTasks] = useState<Task[]>([
     {
       id: "1",
@@ -225,6 +249,7 @@ export default function HomePage() {
     {
       id: "3",
       title: "Clean up analytics dashboard",
+      scheduledTime: undefined,
       priority: "low",
       status: "done",
     },
@@ -232,14 +257,14 @@ export default function HomePage() {
 
   const [filter, setFilter] = useState<Filter>(null);
   const [lastHeardText, setLastHeardText] = useState<string | null>(null);
-  const [lastActionSummary, setLastActionSummary] = useState<string | null>(null);
+  const [lastActionSummary, setLastActionSummary] =
+    useState<string | null>(null);
   const [listening, setListening] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
 
   const recognitionRef = useRef<any>(null);
 
-  // ---------- Hotkey toggle ----------
-
+  // Toggle with spacebar
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.code === "Space" && !e.repeat) {
@@ -251,8 +276,7 @@ export default function HomePage() {
     return () => window.removeEventListener("keydown", handler);
   }, [listening]);
 
-  // ---------- SpeechRecognition ----------
-
+  // Setup SpeechRecognition
   useEffect(() => {
     const w = window as any;
     const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
@@ -270,22 +294,31 @@ export default function HomePage() {
     rec.onresult = (event: any) => {
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (event.results[i].isFinal) {
-          processTranscript(event.results[i][0].transcript.trim());
+          const text = event.results[i][0].transcript.trim();
+          processTranscript(text);
         }
       }
     };
 
-    rec.onerror = () => {
+    rec.onerror = (event: any) => {
+      console.warn("SpeechRecognition error:", event?.error || event);
       try {
-        rec.stop();
-      } catch {}
+        recognitionRef.current?.stop();
+      } catch {
+        // ignore
+      }
       setListening(false);
+    };
+
+    rec.onend = () => {
+      // no auto-restart; user presses Space again
     };
 
     recognitionRef.current = rec;
   }, []);
 
   function startListening() {
+    if (!speechSupported) return;
     recognitionRef.current?.start();
     setListening(true);
   }
@@ -310,32 +343,189 @@ export default function HomePage() {
       const rawIntent: Intent = data.intent;
 
       setTasks((prev) => {
-        const resolved = remapIntentForUI(rawIntent, prev, filter);
-        return applyIntent(prev, resolved);
+        // remap "task 1/2/3" to the row the user actually sees
+        const resolvedIntent = remapIntentForUI(rawIntent, prev, filter);
+        return applyIntent(prev, resolvedIntent);
       });
 
       setLastActionSummary(`AI action: ${rawIntent.operation}`);
-    } catch (err) {
+    } catch (e) {
+      console.warn(e);
       setLastActionSummary("Backend error");
     }
   }
 
   function processTranscript(text: string) {
+    console.log("Heard (raw):", text);
     const cleaned = normalizeTranscriptText(text);
+    console.log("Normalized for AI:", cleaned);
+
     stopListening();
     sendToPython(cleaned);
+
     setLastHeardText(text);
   }
 
-  const visibleTasks = useMemo(() => getVisibleTasks(tasks, filter), [tasks, filter]);
+  const visibleTasks = useMemo(
+    () => getVisibleTasks(tasks, filter),
+    [tasks, filter]
+  );
 
   const currentPriorityFilter = filter?.priority ?? null;
 
-  // ---------- UI ----------
-
   return (
     <div className="min-h-screen flex flex-col bg-slate-950 text-slate-50">
-      {/* content omitted for brevity — same UI layout as before */}
+      <main className="flex-grow">
+        <div className="mx-auto max-w-4xl px-4 py-8">
+          <header className="mb-8 flex items-center justify-between">
+            <div>
+              <h1 className="text-3xl font-bold">A.D.I To-Do Lists</h1>
+              <p className="text-sm text-slate-400">
+                Press <span className="font-mono">Space</span> to start/stop
+                listening.
+              </p>
+              {!speechSupported && (
+                <p className="text-xs text-red-400 mt-1">
+                  Speech recognition not supported in this browser. Try Chrome
+                  or Edge.
+                </p>
+              )}
+            </div>
+
+            <button
+              onClick={() => (listening ? stopListening() : startListening())}
+              className={`rounded-full px-4 py-2 text-sm font-medium ${
+                listening ? "bg-red-500" : "bg-emerald-500 text-slate-900"
+              }`}
+            >
+              {listening ? "Listening..." : "Start Listening"}
+            </button>
+          </header>
+
+          {/* Last command card */}
+          <section className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <h2 className="text-sm font-semibold text-slate-300 mb-2">
+              Last command
+            </h2>
+            <p className="text-slate-400">
+              Heard:{" "}
+              <span className="text-slate-100">
+                {lastHeardText ?? "None"}
+              </span>
+            </p>
+            <p className="text-slate-400">
+              Action:{" "}
+              <span className="text-emerald-400">
+                {lastActionSummary ?? "—"}
+              </span>
+            </p>
+          </section>
+
+          {/* Tasks */}
+          <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="mb-3 flex items-center justify-between gap-4">
+              <h2 className="text-sm font-semibold text-slate-300">Tasks</h2>
+
+              {/* Priority filter buttons */}
+              <div className="flex gap-2 text-xs">
+                <button
+                  onClick={() => setFilter(null)}
+                  className={`rounded-full px-3 py-1 border ${
+                    currentPriorityFilter === null
+                      ? "bg-slate-100 text-slate-900 border-slate-100"
+                      : "border-slate-600 text-slate-300 hover:border-slate-300"
+                  }`}
+                >
+                  All
+                </button>
+                <button
+                  onClick={() => setFilter({ priority: "high" })}
+                  className={`rounded-full px-3 py-1 border ${
+                    currentPriorityFilter === "high"
+                      ? "bg-red-500 text-slate-50 border-red-500"
+                      : "border-slate-600 text-slate-300 hover-border-slate-300"
+                  }`}
+                >
+                  High
+                </button>
+                <button
+                  onClick={() => setFilter({ priority: "medium" })}
+                  className={`rounded-full px-3 py-1 border ${
+                    currentPriorityFilter === "medium"
+                      ? "bg-amber-400 text-slate-900 border-amber-400"
+                      : "border-slate-600 text-slate-300 hover-border-slate-300"
+                  }`}
+                >
+                  Medium
+                </button>
+                <button
+                  onClick={() => setFilter({ priority: "low" })}
+                  className={`rounded-full px-3 py-1 border ${
+                    currentPriorityFilter === "low"
+                      ? "bg-emerald-500 text-slate-900 border-emerald-500"
+                      : "border-slate-600 text-slate-300 hover-border-slate-300"
+                  }`}
+                >
+                  Low
+                </button>
+              </div>
+            </div>
+
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-800">
+                  <th className="px-3 py-2 text-left text-xs text-slate-400">
+                    #
+                  </th>
+                  <th className="px-3 py-2 text-left text-xs text-slate-400">
+                    Title
+                  </th>
+                  <th className="px-3 py-2 text-left text-xs text-slate-400">
+                    Scheduled
+                  </th>
+                  <th className="px-3 py-2 text-left text-xs text-slate-400">
+                    Priority
+                  </th>
+                  <th className="px-3 py-2 text-left text-xs text-slate-400">
+                    Status
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleTasks.map((t, i) => (
+                  <tr key={t.id} className="border-b border-slate-800">
+                    <td className="px-3 py-2 text-xs text-slate-500">
+                      {i + 1}
+                    </td>
+                    <td className="px-3 py-2">{t.title}</td>
+                    <td className="px-3 py-2">{formatTime(t.scheduledTime)}</td>
+                    <td className="px-3 py-2 capitalize">{t.priority}</td>
+                    <td className="px-3 py-2 capitalize">{t.status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+        </div>
+      </main>
+
+      <footer className="mt-auto text-center text-gray-400 text-sm border-t border-slate-800 py-4">
+        <p>
+          Created by <strong>Aditya Raj (aadi0032007)</strong>
+        </p>
+        <p>
+          Email:{" "}
+          <a href="mailto:ms.adityaraj@gmail.com" className="text-blue-400">
+            ms.adityaraj@gmail.com
+          </a>
+        </p>
+        <p>
+          Contact:{" "}
+          <a href="tel:+917543037822" className="text-blue-400">
+            +91-7543037822
+          </a>
+        </p>
+      </footer>
     </div>
   );
 }
