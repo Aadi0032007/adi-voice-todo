@@ -68,6 +68,7 @@ function formatTime(iso?: string): string {
   return `${datePart} ${timePart?.slice(0, 5)}`;
 }
 
+/** normalize numeric index from model to 0-based array index */
 function normalizeIndex(rawIndex: number, tasks: Task[]): number | null {
   const n = tasks.length;
   if (n === 0) return null;
@@ -85,10 +86,12 @@ function normalizeIndex(rawIndex: number, tasks: Task[]): number | null {
   return null;
 }
 
+/** Fix misheard "cars 2" → "task 2" */
 function normalizeTranscriptText(text: string): string {
   return text.replace(/\b[Cc]ars?\s+(\d+)\b/g, "task $1");
 }
 
+/** Fuzzy title matching for "delete the payment bug task" etc. */
 function matchesTitleFuzzy(title: string, query: string): boolean {
   const normalizedTitle = title.toLowerCase();
   const q = query.toLowerCase().trim();
@@ -98,6 +101,7 @@ function matchesTitleFuzzy(title: string, query: string): boolean {
   return words.some((w) => normalizedTitle.includes(w));
 }
 
+/** Visible tasks (what the user sees) = filtered + sorted */
 function getVisibleTasks(tasks: Task[], filter: Filter): Task[] {
   let result = [...tasks];
   if (filter?.priority) {
@@ -117,7 +121,7 @@ function applyIntent(tasks: Task[], intent: Intent): Task[] {
           id: crypto.randomUUID(),
           title: intent.data.title ?? "Untitled task",
           scheduledTime: intent.data.scheduledTime,
-          priority: intent.data.priority ?? "low",
+          priority: intent.data.priority ?? "low", // default low
           status: intent.data.status ?? "pending",
         },
       ];
@@ -189,28 +193,32 @@ function updateByTarget(
   return tasks;
 }
 
-// ---------- Index mapping ----------
+// ---------- Remap index so "task 1" refers to visible row 1 ----------
 
 function remapIntentForUI(intent: Intent, tasks: Task[], filter: Filter): Intent {
   if (!intent.target || intent.target.mode !== "by_index") return intent;
   if (intent.target.index == null) return intent;
 
   const visible = getVisibleTasks(tasks, filter);
-  const uiIndex = intent.target.index - 1;
+  const uiIndex = intent.target.index - 1; // 1-based to 0-based
 
   if (uiIndex < 0 || uiIndex >= visible.length) {
+    console.warn("UI index out of range:", intent.target.index);
     return { ...intent, operation: "noop" };
   }
 
   const taskId = visible[uiIndex].id;
   const realIndex = tasks.findIndex((t) => t.id === taskId);
-  if (realIndex === -1) return intent;
+  if (realIndex === -1) {
+    console.warn("Could not map visible index to real task index");
+    return intent;
+  }
 
   return {
     ...intent,
     target: {
       ...intent.target,
-      index: realIndex + 1,
+      index: realIndex + 1, // back to 1-based for normalizeIndex()
     },
   };
 }
@@ -256,7 +264,7 @@ export default function HomePage() {
 
   const recognitionRef = useRef<any>(null);
 
-  // Spacebar toggles listening
+  // Toggle with spacebar
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.code === "Space" && !e.repeat) {
@@ -268,7 +276,7 @@ export default function HomePage() {
     return () => window.removeEventListener("keydown", handler);
   }, [listening]);
 
-  // Setup STT
+  // Setup SpeechRecognition
   useEffect(() => {
     const w = window as any;
     const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
@@ -292,8 +300,19 @@ export default function HomePage() {
       }
     };
 
-    rec.onerror = () => setListening(false);
-    rec.onend = () => {};
+    rec.onerror = (event: any) => {
+      console.warn("SpeechRecognition error:", event?.error || event);
+      try {
+        recognitionRef.current?.stop();
+      } catch {
+        // ignore
+      }
+      setListening(false);
+    };
+
+    rec.onend = () => {
+      // no auto-restart; user presses Space again
+    };
 
     recognitionRef.current = rec;
   }, []);
@@ -310,39 +329,59 @@ export default function HomePage() {
   }
 
   async function sendToPython(text: string) {
-    setLastHeardText(text);
-    setLastActionSummary("Processing...");
+  setLastHeardText(text);
+  setLastActionSummary("Processing...");
 
-    try {
-      const res = await fetch(`${API_BASE}/parse-intent`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
+  try {
+    const res = await fetch(`${API_BASE}/parse-intent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
 
-      const data = await res.json();
-      const rawIntent: Intent = data.intent;
+    const data = await res.json();
+    const rawIntent: Intent = data.intent;
 
-      setTasks((prev) => {
-        const resolved = remapIntentForUI(rawIntent, prev, filter);
-        return applyIntent(prev, resolved);
-      });
-
-      // ✔ SAFETY MESSAGE HERE
-      if (rawIntent.operation === "noop") {
-        setLastActionSummary("Couldn't understand the command.");
-      } else {
-        setLastActionSummary(`AI action: ${rawIntent.operation}`);
-      }
-    } catch {
-      setLastActionSummary("Backend error");
+    // -------------- ✔ NOOP SAFETY CHECK -----------------
+    if (!rawIntent || rawIntent.operation === "noop") {
+      console.warn("NOOP intent or invalid intent:", rawIntent);
+      setLastActionSummary("No action (noop)");
+      return; // <-- prevent UI crash
     }
+
+    // -------------- ✔ DELETE/UPDATE NEED A TARGET -------
+    if (
+      (rawIntent.operation === "delete" ||
+        rawIntent.operation === "update") &&
+      !rawIntent.target
+    ) {
+      console.warn("Missing target for operation:", rawIntent);
+      setLastActionSummary("Invalid command (no target)");
+      return;
+    }
+
+    // -------------- ✔ SAFE APPLY -------------------------
+    setTasks((prev) => {
+      const resolved = remapIntentForUI(rawIntent, prev, filter);
+      return applyIntent(prev, resolved);
+    });
+
+    setLastActionSummary(`AI action: ${rawIntent.operation}`);
+  } catch (e) {
+    console.warn(e);
+    setLastActionSummary("Backend error");
   }
+}
+
 
   function processTranscript(text: string) {
+    console.log("Heard (raw):", text);
     const cleaned = normalizeTranscriptText(text);
+    console.log("Normalized for AI:", cleaned);
+
     stopListening();
     sendToPython(cleaned);
+
     setLastHeardText(text);
   }
 
@@ -366,7 +405,8 @@ export default function HomePage() {
               </p>
               {!speechSupported && (
                 <p className="text-xs text-red-400 mt-1">
-                  Speech recognition not supported in this browser.
+                  Speech recognition not supported in this browser. Try Chrome
+                  or Edge.
                 </p>
               )}
             </div>
@@ -381,13 +421,16 @@ export default function HomePage() {
             </button>
           </header>
 
-          {/* Last command */}
+          {/* Last command card */}
           <section className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
             <h2 className="text-sm font-semibold text-slate-300 mb-2">
               Last command
             </h2>
             <p className="text-slate-400">
-              Heard: <span className="text-slate-100">{lastHeardText ?? "None"}</span>
+              Heard:{" "}
+              <span className="text-slate-100">
+                {lastHeardText ?? "None"}
+              </span>
             </p>
             <p className="text-slate-400">
               Action:{" "}
@@ -402,6 +445,7 @@ export default function HomePage() {
             <div className="mb-3 flex items-center justify-between gap-4">
               <h2 className="text-sm font-semibold text-slate-300">Tasks</h2>
 
+              {/* Priority filter buttons */}
               <div className="flex gap-2 text-xs">
                 <button
                   onClick={() => setFilter(null)}
@@ -418,7 +462,7 @@ export default function HomePage() {
                   className={`rounded-full px-3 py-1 border ${
                     currentPriorityFilter === "high"
                       ? "bg-red-500 text-slate-50 border-red-500"
-                      : "border-slate-600 text-slate-300 hover:border-slate-300"
+                      : "border-slate-600 text-slate-300 hover-border-slate-300"
                   }`}
                 >
                   High
@@ -428,7 +472,7 @@ export default function HomePage() {
                   className={`rounded-full px-3 py-1 border ${
                     currentPriorityFilter === "medium"
                       ? "bg-amber-400 text-slate-900 border-amber-400"
-                      : "border-slate-600 text-slate-300 hover:border-slate-300"
+                      : "border-slate-600 text-slate-300 hover-border-slate-300"
                   }`}
                 >
                   Medium
@@ -438,7 +482,7 @@ export default function HomePage() {
                   className={`rounded-full px-3 py-1 border ${
                     currentPriorityFilter === "low"
                       ? "bg-emerald-500 text-slate-900 border-emerald-500"
-                      : "border-slate-600 text-slate-300 hover:border-slate-300"
+                      : "border-slate-600 text-slate-300 hover-border-slate-300"
                   }`}
                 >
                   Low
@@ -449,7 +493,9 @@ export default function HomePage() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-800">
-                  <th className="px-3 py-2 text-left text-xs text-slate-400">#</th>
+                  <th className="px-3 py-2 text-left text-xs text-slate-400">
+                    #
+                  </th>
                   <th className="px-3 py-2 text-left text-xs text-slate-400">
                     Title
                   </th>
@@ -467,7 +513,9 @@ export default function HomePage() {
               <tbody>
                 {visibleTasks.map((t, i) => (
                   <tr key={t.id} className="border-b border-slate-800">
-                    <td className="px-3 py-2 text-xs text-slate-500">{i + 1}</td>
+                    <td className="px-3 py-2 text-xs text-slate-500">
+                      {i + 1}
+                    </td>
                     <td className="px-3 py-2">{t.title}</td>
                     <td className="px-3 py-2">{formatTime(t.scheduledTime)}</td>
                     <td className="px-3 py-2 capitalize">{t.priority}</td>
