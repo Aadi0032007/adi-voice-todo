@@ -68,7 +68,6 @@ function formatTime(iso?: string): string {
   return `${datePart} ${timePart?.slice(0, 5)}`;
 }
 
-/** normalize numeric index from model to 0-based array index */
 function normalizeIndex(rawIndex: number, tasks: Task[]): number | null {
   const n = tasks.length;
   if (n === 0) return null;
@@ -86,12 +85,10 @@ function normalizeIndex(rawIndex: number, tasks: Task[]): number | null {
   return null;
 }
 
-/** Fix misheard "cars 2" → "task 2" */
 function normalizeTranscriptText(text: string): string {
   return text.replace(/\b[Cc]ars?\s+(\d+)\b/g, "task $1");
 }
 
-/** Fuzzy title matching for "delete the payment bug task" etc. */
 function matchesTitleFuzzy(title: string, query: string): boolean {
   const normalizedTitle = title.toLowerCase();
   const q = query.toLowerCase().trim();
@@ -101,7 +98,6 @@ function matchesTitleFuzzy(title: string, query: string): boolean {
   return words.some((w) => normalizedTitle.includes(w));
 }
 
-/** Visible tasks (what the user sees) = filtered + sorted */
 function getVisibleTasks(tasks: Task[], filter: Filter): Task[] {
   let result = [...tasks];
   if (filter?.priority) {
@@ -121,7 +117,7 @@ function applyIntent(tasks: Task[], intent: Intent): Task[] {
           id: crypto.randomUUID(),
           title: intent.data.title ?? "Untitled task",
           scheduledTime: intent.data.scheduledTime,
-          priority: intent.data.priority ?? "low", // default low
+          priority: intent.data.priority ?? "low",
           status: intent.data.status ?? "pending",
         },
       ];
@@ -193,32 +189,28 @@ function updateByTarget(
   return tasks;
 }
 
-// ---------- Remap index so "task 1" refers to visible row 1 ----------
+// ---------- Index mapping ----------
 
 function remapIntentForUI(intent: Intent, tasks: Task[], filter: Filter): Intent {
   if (!intent.target || intent.target.mode !== "by_index") return intent;
   if (intent.target.index == null) return intent;
 
   const visible = getVisibleTasks(tasks, filter);
-  const uiIndex = intent.target.index - 1; // 1-based to 0-based
+  const uiIndex = intent.target.index - 1;
 
   if (uiIndex < 0 || uiIndex >= visible.length) {
-    console.warn("UI index out of range:", intent.target.index);
     return { ...intent, operation: "noop" };
   }
 
   const taskId = visible[uiIndex].id;
   const realIndex = tasks.findIndex((t) => t.id === taskId);
-  if (realIndex === -1) {
-    console.warn("Could not map visible index to real task index");
-    return intent;
-  }
+  if (realIndex === -1) return intent;
 
   return {
     ...intent,
     target: {
       ...intent.target,
-      index: realIndex + 1, // back to 1-based for normalizeIndex()
+      index: realIndex + 1,
     },
   };
 }
@@ -264,7 +256,7 @@ export default function HomePage() {
 
   const recognitionRef = useRef<any>(null);
 
-  // Toggle with spacebar
+  // Spacebar toggles listening
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.code === "Space" && !e.repeat) {
@@ -276,7 +268,7 @@ export default function HomePage() {
     return () => window.removeEventListener("keydown", handler);
   }, [listening]);
 
-  // Setup SpeechRecognition
+  // Setup STT
   useEffect(() => {
     const w = window as any;
     const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
@@ -300,19 +292,8 @@ export default function HomePage() {
       }
     };
 
-    rec.onerror = (event: any) => {
-      console.warn("SpeechRecognition error:", event?.error || event);
-      try {
-        recognitionRef.current?.stop();
-      } catch {
-        // ignore
-      }
-      setListening(false);
-    };
-
-    rec.onend = () => {
-      // no auto-restart; user presses Space again
-    };
+    rec.onerror = () => setListening(false);
+    rec.onend = () => {};
 
     recognitionRef.current = rec;
   }, []);
@@ -343,26 +324,25 @@ export default function HomePage() {
       const rawIntent: Intent = data.intent;
 
       setTasks((prev) => {
-        // remap "task 1/2/3" to the row the user actually sees
-        const resolvedIntent = remapIntentForUI(rawIntent, prev, filter);
-        return applyIntent(prev, resolvedIntent);
+        const resolved = remapIntentForUI(rawIntent, prev, filter);
+        return applyIntent(prev, resolved);
       });
 
-      setLastActionSummary(`AI action: ${rawIntent.operation}`);
-    } catch (e) {
-      console.warn(e);
+      // ✔ SAFETY MESSAGE HERE
+      if (rawIntent.operation === "noop") {
+        setLastActionSummary("Couldn't understand the command.");
+      } else {
+        setLastActionSummary(`AI action: ${rawIntent.operation}`);
+      }
+    } catch {
       setLastActionSummary("Backend error");
     }
   }
 
   function processTranscript(text: string) {
-    console.log("Heard (raw):", text);
     const cleaned = normalizeTranscriptText(text);
-    console.log("Normalized for AI:", cleaned);
-
     stopListening();
     sendToPython(cleaned);
-
     setLastHeardText(text);
   }
 
@@ -386,8 +366,7 @@ export default function HomePage() {
               </p>
               {!speechSupported && (
                 <p className="text-xs text-red-400 mt-1">
-                  Speech recognition not supported in this browser. Try Chrome
-                  or Edge.
+                  Speech recognition not supported in this browser.
                 </p>
               )}
             </div>
@@ -402,16 +381,13 @@ export default function HomePage() {
             </button>
           </header>
 
-          {/* Last command card */}
+          {/* Last command */}
           <section className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
             <h2 className="text-sm font-semibold text-slate-300 mb-2">
               Last command
             </h2>
             <p className="text-slate-400">
-              Heard:{" "}
-              <span className="text-slate-100">
-                {lastHeardText ?? "None"}
-              </span>
+              Heard: <span className="text-slate-100">{lastHeardText ?? "None"}</span>
             </p>
             <p className="text-slate-400">
               Action:{" "}
@@ -426,7 +402,6 @@ export default function HomePage() {
             <div className="mb-3 flex items-center justify-between gap-4">
               <h2 className="text-sm font-semibold text-slate-300">Tasks</h2>
 
-              {/* Priority filter buttons */}
               <div className="flex gap-2 text-xs">
                 <button
                   onClick={() => setFilter(null)}
@@ -443,7 +418,7 @@ export default function HomePage() {
                   className={`rounded-full px-3 py-1 border ${
                     currentPriorityFilter === "high"
                       ? "bg-red-500 text-slate-50 border-red-500"
-                      : "border-slate-600 text-slate-300 hover-border-slate-300"
+                      : "border-slate-600 text-slate-300 hover:border-slate-300"
                   }`}
                 >
                   High
@@ -453,7 +428,7 @@ export default function HomePage() {
                   className={`rounded-full px-3 py-1 border ${
                     currentPriorityFilter === "medium"
                       ? "bg-amber-400 text-slate-900 border-amber-400"
-                      : "border-slate-600 text-slate-300 hover-border-slate-300"
+                      : "border-slate-600 text-slate-300 hover:border-slate-300"
                   }`}
                 >
                   Medium
@@ -463,7 +438,7 @@ export default function HomePage() {
                   className={`rounded-full px-3 py-1 border ${
                     currentPriorityFilter === "low"
                       ? "bg-emerald-500 text-slate-900 border-emerald-500"
-                      : "border-slate-600 text-slate-300 hover-border-slate-300"
+                      : "border-slate-600 text-slate-300 hover:border-slate-300"
                   }`}
                 >
                   Low
@@ -474,9 +449,7 @@ export default function HomePage() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-800">
-                  <th className="px-3 py-2 text-left text-xs text-slate-400">
-                    #
-                  </th>
+                  <th className="px-3 py-2 text-left text-xs text-slate-400">#</th>
                   <th className="px-3 py-2 text-left text-xs text-slate-400">
                     Title
                   </th>
@@ -494,9 +467,7 @@ export default function HomePage() {
               <tbody>
                 {visibleTasks.map((t, i) => (
                   <tr key={t.id} className="border-b border-slate-800">
-                    <td className="px-3 py-2 text-xs text-slate-500">
-                      {i + 1}
-                    </td>
+                    <td className="px-3 py-2 text-xs text-slate-500">{i + 1}</td>
                     <td className="px-3 py-2">{t.title}</td>
                     <td className="px-3 py-2">{formatTime(t.scheduledTime)}</td>
                     <td className="px-3 py-2 capitalize">{t.priority}</td>
