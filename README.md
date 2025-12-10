@@ -3,6 +3,10 @@
 🔗 **Live Web App:**  
 👉 https://adi-voice-todo.vercel.app/
 
+## 🚀 Landing Page UI
+
+![Landing Page](./media/adi-todo-ss.png)
+
 A voice-controlled smart to-do list where you can **speak naturally**, and the AI will automatically **create**, **update**, **delete**, or **filter** your tasks.
 
 Press **Space** or click the button to speak — and watch your tasks update instantly.
