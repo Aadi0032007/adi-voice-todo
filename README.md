@@ -1,7 +1,5 @@
 # 🎙️ A.D.I Voice To-Do App — AI Powered Task Manager
 
-🔗 **Live Web App:**  
-👉 https://adi-voice-todo.vercel.app/
 
 ## 🚀 Landing Page UI
 
